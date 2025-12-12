@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>问答题在线作答</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background: #f6f8fa; color: #333; }
+        header { margin-bottom: 20px; }
+        .card { background: #fff; border-radius: 8px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+        .question { margin-top: 8px; font-weight: bold; }
+        textarea { width: 100%; min-height: 80px; margin-top: 8px; }
+        button { padding: 8px 12px; border: none; background: #0366d6; color: white; border-radius: 4px; cursor: pointer; }
+        button:disabled { background: #9eb7e0; cursor: not-allowed; }
+        .result { margin-top: 8px; font-weight: bold; }
+        .steps { list-style: decimal; padding-left: 20px; }
+        .step-row { display: flex; gap: 8px; align-items: center; margin-bottom: 4px; }
+        .step-row span { flex: 1; }
+        .mode-toggle { margin-top: 8px; }
+        .status { margin-top: 8px; color: #555; }
+        input[type="number"] { width: 80px; }
+        .small { font-size: 12px; color: #555; }
+    </style>
+</head>
+<body>
+<header>
+    <h1>问答题在线作答</h1>
+    <div class="card">
+        <div class="controls">
+            <input type="file" id="fileInput" accept="application/json">
+            <button id="uploadBtn">上传题目</button>
+            <label>随机抽取数量：<input id="questionCount" type="number" min="1" value="3"></label>
+            <button id="loadBtn">抽题</button>
+        </div>
+        <div class="status" id="status"></div>
+    </div>
+</header>
+
+<main id="questionContainer"></main>
+
+<script>
+const statusBox = document.getElementById('status');
+const questionContainer = document.getElementById('questionContainer');
+const questionCountInput = document.getElementById('questionCount');
+const questionStates = new Map();
+
+function setStatus(message, isError = false) {
+    statusBox.textContent = message;
+    statusBox.style.color = isError ? '#b00020' : '#006400';
+}
+
+async function uploadFile() {
+    const fileInput = document.getElementById('fileInput');
+    if (!fileInput.files.length) {
+        setStatus('请先选择一个JSON文件。', true);
+        return;
+    }
+    const formData = new FormData();
+    formData.append('file', fileInput.files[0]);
+
+    setStatus('正在上传...');
+    const response = await fetch('/api/upload', { method: 'POST', body: formData });
+    const payload = await response.json();
+    if (!response.ok) {
+        setStatus(payload.error || '上传失败', true);
+        return;
+    }
+    setStatus(`上传成功，共 ${payload.total} 道题目。`);
+    questionContainer.innerHTML = '';
+}
+
+async function loadQuestions() {
+    const count = parseInt(questionCountInput.value, 10) || 1;
+    setStatus('正在抽题...');
+    const response = await fetch(`/api/random?n=${count}`);
+    const payload = await response.json();
+    if (!response.ok) {
+        setStatus(payload.error || '抽题失败', true);
+        questionContainer.innerHTML = '';
+        return;
+    }
+
+    renderQuestions(payload.questions);
+    setStatus(`已抽取 ${payload.questions.length} 道题（题库共 ${payload.available} 道）。`);
+}
+
+function renderQuestions(questions) {
+    questionContainer.innerHTML = '';
+    questionStates.clear();
+    questions.forEach((q, index) => {
+        questionStates.set(q.id, { order: [...q.steps_shuffled] });
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.innerHTML = `
+            <div class="small">第 ${index + 1} 题</div>
+            <div class="question">${q.ask}</div>
+            <div class="mode-toggle">
+                <label><input type="radio" name="mode-${q.id}" value="manual" checked> 手动填入答案</label>
+                <label><input type="radio" name="mode-${q.id}" value="order"> 排序答案步骤</label>
+            </div>
+            <div id="manual-${q.id}">
+                <textarea id="input-${q.id}" placeholder="请输入你的答案...\n支持多行，每行可以是一步"></textarea>
+                <label class="small">匹配阈值（0-1）：<input type="number" step="0.05" min="0" max="1" value="0.6" id="threshold-${q.id}"></label>
+            </div>
+            <div id="order-${q.id}" style="display:none">
+                <div class="small">点击上下移动重新排序：</div>
+                <ol class="steps" id="steps-${q.id}"></ol>
+            </div>
+            <button id="submit-${q.id}">提交答案</button>
+            <div class="result" id="result-${q.id}"></div>
+        `;
+        questionContainer.appendChild(card);
+
+        renderStepList(q.id);
+        card.querySelectorAll(`input[name="mode-${q.id}"]`).forEach(radio => {
+            radio.addEventListener('change', () => toggleMode(q.id, radio.value));
+        });
+        document.getElementById(`submit-${q.id}`).addEventListener('click', () => submitAnswer(q.id));
+    });
+}
+
+function toggleMode(id, mode) {
+    const manual = document.getElementById(`manual-${id}`);
+    const order = document.getElementById(`order-${id}`);
+    manual.style.display = mode === 'manual' ? 'block' : 'none';
+    order.style.display = mode === 'order' ? 'block' : 'none';
+}
+
+function renderStepList(id) {
+    const list = document.getElementById(`steps-${id}`);
+    if (!list) return;
+    const current = questionStates.get(id).order;
+    list.innerHTML = '';
+    current.forEach((step, idx) => {
+        const li = document.createElement('li');
+        const row = document.createElement('div');
+        row.className = 'step-row';
+        const text = document.createElement('span');
+        text.textContent = step;
+        const upBtn = document.createElement('button');
+        upBtn.textContent = '上移';
+        upBtn.disabled = idx === 0;
+        upBtn.addEventListener('click', () => moveStep(id, idx, -1));
+        const downBtn = document.createElement('button');
+        downBtn.textContent = '下移';
+        downBtn.disabled = idx === current.length - 1;
+        downBtn.addEventListener('click', () => moveStep(id, idx, 1));
+        row.appendChild(text);
+        row.appendChild(upBtn);
+        row.appendChild(downBtn);
+        li.appendChild(row);
+        list.appendChild(li);
+    });
+}
+
+function moveStep(id, index, delta) {
+    const state = questionStates.get(id);
+    const target = index + delta;
+    if (target < 0 || target >= state.order.length) return;
+    const updated = [...state.order];
+    [updated[index], updated[target]] = [updated[target], updated[index]];
+    state.order = updated;
+    questionStates.set(id, state);
+    renderStepList(id);
+}
+
+async function submitAnswer(id) {
+    const mode = document.querySelector(`input[name="mode-${id}"]:checked`).value;
+    const resultBox = document.getElementById(`result-${id}`);
+    resultBox.textContent = '正在提交...';
+
+    if (mode === 'manual') {
+        const text = document.getElementById(`input-${id}`).value;
+        const threshold = parseFloat(document.getElementById(`threshold-${id}`).value || '0.6');
+        const response = await fetch('/api/submit_manual', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, response: text, threshold })
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+            resultBox.textContent = payload.error || '提交失败';
+            resultBox.style.color = '#b00020';
+            return;
+        }
+        const correctness = payload.correct ? '✅ 正确' : '❌ 不正确';
+        resultBox.textContent = `${correctness}（相似度：${payload.similarity}，阈值：${payload.threshold}）`;
+        resultBox.style.color = payload.correct ? '#006400' : '#b00020';
+    } else {
+        const order = questionStates.get(id)?.order || [];
+        const response = await fetch('/api/submit_order', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, ordered_steps: order })
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+            resultBox.textContent = payload.error || '提交失败';
+            resultBox.style.color = '#b00020';
+            return;
+        }
+        resultBox.textContent = payload.correct ? '✅ 顺序正确' : '❌ 顺序错误';
+        resultBox.style.color = payload.correct ? '#006400' : '#b00020';
+    }
+}
+
+
+document.getElementById('uploadBtn').addEventListener('click', uploadFile);
+document.getElementById('loadBtn').addEventListener('click', loadQuestions);
+</script>
+</body>
+</html>
